@@ -1,0 +1,40 @@
+! block decays of charm hadrons
+411:mayDecay = false
+-411:mayDecay = false
+421:mayDecay = false
+-421:mayDecay = false
+431:mayDecay = false
+-431:mayDecay = false
+441:mayDecay = false
+-441:mayDecay = false
+443:mayDecay = false
+-443:mayDecay = false
+
+4122:mayDecay = false
+-4122:mayDecay = false
+4132:mayDecay = false
+-4132:mayDecay = false
+4232:mayDecay = false
+-4232:mayDecay = false
+4332:mayDecay = false
+-4332:mayDecay = false
+
+
+! block decays of beauty hadrons
+511:mayDecay = false
+-511:mayDecay = false
+521:mayDecay = false
+-521:mayDecay = false
+531:mayDecay = false
+-531:mayDecay = false
+
+5122:mayDecay = false
+-5122:mayDecay = false
+5132:mayDecay = false
+-5132:mayDecay = false
+5232:mayDecay = false
+-5232:mayDecay = false
+5332:mayDecay = false
+-5332:mayDecay = false
+
+PhaseSpace:bias2Selection = on
