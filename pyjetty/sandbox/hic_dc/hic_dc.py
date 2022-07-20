@@ -18,6 +18,7 @@ import pythiafjext
 import pythiaext
 
 from pyjetty.mputils import MPBase, pwarning, pinfo, perror, treewriter, jet_analysis
+from pyjetty.alice_analysis.process.base import common_base
 
 # see:
 # https://github.com/matplo/pyjetty/blob/5a515bf7714d7c040ae90ebf5d4343dbee1a4874/pyjetty/alice_analysis/process/user/james/process_groomers.py#L824-L1033
@@ -71,13 +72,131 @@ def match_dR(j, partons, drmatch = 0.1):
 
 
 
+
+
+def process_files_list(input_files_param):
+    """
+    if `input_files_param` is file ending with txt extension then returns list of files from that file
+        lines starting with hashtag `#` are skipped
+    if `input_files_param` is command starting from `supported_commands` then it executes it and returns list of files
+    otherwise assume `input_files_param` is directory containing the files on which `ls` is run
+    """
+    if input_files_param is None:
+        return None
+    list_of_files = []
+    if input_files_param.endswith(".txt"):
+        print(f"\nReading files' names from the file: {input_files_param}")
+        with open(input_files_param) as f:
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                list_of_files.append(line.replace("\n", ""))
+    else:
+        import subprocess
+        supported_commands = ("ls", "find")  # must be tuple not list
+        if input_files_param.startswith(supported_commands):
+            cmd = input_files_param
+        else:
+            cmd = f"ls {input_files_param}"
+        print(f"\nRunning command: {cmd}")
+        cmd_output = subprocess.check_output(cmd, shell=True, text=True)
+        for line in cmd_output.split("\n"):
+            if line.startswith("#"):
+                continue
+            if line:
+                list_of_files.append(line.replace("\n", ""))
+    if len(list_of_files) < 1:
+        raise ValueError("List of files empty!")
+    from_to = (
+        f"from\n{list_of_files[0]}\nto\n{list_of_files[-1]}"
+        if len(list_of_files) > 2
+        else f"{list_of_files}"
+    )
+    print(f"List of N={len(list_of_files)} files created, {from_to}")
+    return list_of_files
+
+
+
+
+class RealBckgGenerator(common_base.CommonBase):
+    def __init__(self,
+                 path_to_data,
+                 rm_n_leading_jets=2,
+                 jet_def=fj.JetDefinition(fj.kt_algorithm, 0.4),
+                 centrality=(0,10)):
+        self.list_of_files = process_files_list(path_to_data)
+        self.rm_n_leading_jets = rm_n_leading_jets
+        self.jet_def = jet_def
+        self.centrality = centrality
+        self.last_event_prop = dict()
+
+    def _rm_leading_jets(self, tracks):
+        from functools import reduce
+        cs = fj.ClusterSequence(tracks, self.jet_def)
+        jets_wo_n_leading = fj.sorted_by_pt(cs.inclusive_jets())[self.rm_n_leading_jets:]
+        # merge all constituents of all jets except N leading
+        tracks_wo_leading_jets = reduce(lambda a, b: a+b, [j.constituents() for j in jets_wo_n_leading])
+
+        self.last_event_prop['mult_wo_lead'] = len(tracks_wo_leading_jets)
+        self.last_event_prop['pt_tot_wo_lead'] = np.sum([p.pt() for p in tracks_wo_leading_jets])
+        # return tracks_wo_leading_jets
+        # or force vectorized output:
+        return fjext.vectorize_pt_eta_phi([p.pt() for p in tracks_wo_leading_jets],
+                                   [p.eta() for p in tracks_wo_leading_jets],
+                                   [p.phi() for p in tracks_wo_leading_jets],
+                                   int(-1e6))
+
+    def _read_random_event(self):
+        import uproot3 as uproot
+        # TODO: set random seed
+
+        # TODO: for now each file has equal weight
+        # not correct as this way an event from low-Nev file has higher chance to be selected
+        # better: set probs ~ to size or #events in each file
+        file_sel = np.random.choice(self.list_of_files)
+        froot = uproot.open(file_sel)
+        tree_ev = froot['PWGHF_TreeCreator/tree_event_char']
+        tree_p = froot['PWGHF_TreeCreator/tree_Particle']
+
+        # TODO: add cut on z_vtx?
+        events_avail = tree_ev.pandas.df(branches=['ev_id', 'centrality']).query('centrality > @self.centrality[0] and centrality < @self.centrality[1]')
+        event_sel = np.random.choice(events_avail['ev_id'])
+
+        pt_eta_phi_arr = tree_p.pandas.df().query('ev_id == @event_sel')[['ParticlePt', 'ParticleEta', 'ParticlePhi']].to_numpy().T
+
+        # Use swig'd function to create a vector of fastjet::PseudoJets from numpy arrays of pt,eta,phi
+        user_index_offset = int(-1e6)
+        fj_particles = fjext.vectorize_pt_eta_phi(*pt_eta_phi_arr, user_index_offset)
+
+        self.last_event_prop = dict(file=file_sel, ev_id=event_sel, centrality=events_avail.query('ev_id == @event_sel').iloc[0]['centrality'],
+                                    mult=len(fj_particles), pt_tot=np.sum([p.pt() for p in fj_particles]))
+
+        return fj_particles
+
+    def load_event(self):
+        # alternative, faster implementation:
+        # read N or all events from given file and cache it
+        tracks = self._read_random_event()
+        n_before = len(tracks)
+        if self.rm_n_leading_jets > 0:
+            tracks = self._rm_leading_jets(tracks)
+        n_after = len(tracks)
+        print(f'#tracks before removal of {self.rm_n_leading_jets} leading jets: {n_before}, after: {n_after}')
+        print(self.last_event_prop)
+        return tracks
+
+
 # def main():
 parser = argparse.ArgumentParser(description='pythia8 fastjet on the fly', prog=os.path.basename(__file__))
 pyconf.add_standard_pythia_args(parser)
 parser.add_argument('--nw', help="no warn", default=False, action='store_true')
 parser.add_argument('--ignore-mycfg', help="ignore some settings hardcoded here", default=False, action='store_true')
-parser.add_argument('--enable-background', help="enable background calc", default=True, action='store_true')
+parser.add_argument('--enable-thermal-background', help="enable thermal background calc", default=True, action='store_true')
+parser.add_argument('--enable-real-background', help="enable real background (from data), supersedes thermal", default=False, action='store_true')
 parser.add_argument('--output', help="output file name", default='leadsj_vs_x_output.root', type=str)
+
+# for real background
+parser.add_argument('--path-real-background', help="text file with list of files or path to directory containing data", default='./data/', type=str)
 
 # for background
 parser.add_argument('--cent-bin', help="centraility bin 0 is the  0-5 percent most central bin", type=int, default=0)
@@ -132,16 +251,8 @@ print (jet_def_rc03)
 
 tw = treewriter.RTreeWriter(name = 'jets', file_name = args.output)
 tgbkg = None
-thg = None
-if args.enable_background:
-    from pyjetty.alice_analysis.process.base import thermal_generator
-    ### params from arxiv2006.01812
-    thg = thermal_generator.ThermalGenerator(N_avg=int(1800*1.8),
-                                             sigma_N=500, # not specified in ref
-                                             beta=0.5,
-                                             eta_max=args.eta)
-    print(thg)
-
+bckg_gen = None
+if args.enable_thermal_background or args.enable_real_background:
     from pyjetty.mputils import CEventSubtractor, CSubtractorJetByJet
     cs = CEventSubtractor(alpha=args.alpha,
                          max_distance=args.dRmax,
@@ -149,6 +260,19 @@ if args.enable_background:
                          bge_rho_grid_size=0.25, # or 1.0  as in https://github.com/matplo/pyjetty/blob/5a515bf7714d7c040ae90ebf5d4343dbee1a4874/pyjetty/alice_analysis/config/theta_g/PbPb/james_groomers_thermal.yaml
                          max_pt_correct=100)
     print(cs)
+    if args.enable_real_background:
+        # raise NotImplementedError
+
+        bckg_gen = RealBckgGenerator(args.path_real_background)
+
+    elif args.enable_thermal_background:
+        from pyjetty.alice_analysis.process.base import thermal_generator
+        ### params from arxiv2006.01812
+        bckg_gen = thermal_generator.ThermalGenerator(N_avg=int(1800*1.8),
+                                                 sigma_N=500, # not specified in ref
+                                                 beta=0.5,
+                                                 eta_max=args.eta)
+    print(bckg_gen)
 
 
 
@@ -165,11 +289,10 @@ for i in tqdm.tqdm(range(args.nev)):
     # parts = pythiafjext.vectorize_select(pythia, [pythiafjext.kFinal], 0, False)
     jets = jet_selector(jet_def(parts))
 
-
     fj_particles_truth = pythiafjext.vectorize_select(pythia, [pythiafjext.kFinal, pythiafjext.kCharged], 0, False)
     if not len(jet_selector(fj.ClusterSequence(fj_particles_truth, jet_def).inclusive_jets())): continue
-    if thg:
-        fj_particles_combined_beforeCS = thg.load_event()
+    if bckg_gen:
+        fj_particles_combined_beforeCS = bckg_gen.load_event()
         print('BEFORE: ',len(fj_particles_combined_beforeCS))
         [fj_particles_combined_beforeCS.push_back(p) for p in fj_particles_truth]
         print('AFTER: ', len(fj_particles_combined_beforeCS), len([p for p in fj_particles_combined_beforeCS if p.user_index() < 0]))
@@ -247,7 +370,6 @@ for i in tqdm.tqdm(range(args.nev)):
             dR = j_true.delta_R(j_comb)
             if dR < matching_R_multiplier * jet_R0:
                 j_true.matches.append(j_comb)
-
 
 
 
@@ -355,7 +477,6 @@ for i in tqdm.tqdm(range(args.nev)):
         def groomer2str(g_algo, g_params):
             return g_algo + ("" if not g_params else "_".join([str(p).replace(".", "") for p in ["",]+ g_params]))
 
-
         def ls2str(ls):
             # print(dir(ls))
             return f'z={ls.z():.3f} Delta={ls.Delta():.3f} kt={ls.kt():.2f} Erad={ls.kt()/(ls.z()*ls.Delta()):.2f}'
@@ -418,6 +539,8 @@ for i in tqdm.tqdm(range(args.nev)):
 
                           #const = j_true.constituents(),
                           #const_comb = j_comb_matched.constituents(),
+
+                          bckg = bckg_gen.last_event_prop if hasattr(bckg_gen, 'last_event_prop') else None,
 
                             ppid           = j_type[0],
                             pquark         = j_type[1],
