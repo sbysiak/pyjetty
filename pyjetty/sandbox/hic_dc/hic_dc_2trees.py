@@ -352,8 +352,8 @@ def print_true_frac(j):
     ptsum_bckg = np.sum([p.pt() for p in j.constituents() if p.user_index() < 0])
     return f'true pt frac = {ptsum_true/(ptsum_true+ptsum_bckg):.2f}, true n frac = {n_true/(n_true+n_bckg):.2f}'
 
-def print_match(j_match,j_true):
-    return f'dR = {j_true.delta_R(j_match):.2f}, shared_pt_frac = {fjtools.matched_pt(j_match, j_true):.2f} ,  {fjtools.matched_pt(j_true, j_match):.2f}'
+def print_match(j_match, j):
+    return f'dR = {j.delta_R(j_match):.2f}, shared_pt_frac = {fjtools.matched_pt(j_match, j):.2f} ,  {fjtools.matched_pt(j, j_match):.2f}'
 
 def groomer2str(g_algo, g_params):
     return g_algo + ("" if not g_params else "_".join([str(p).replace(".", "") for p in ["",]+ g_params]))
@@ -371,6 +371,10 @@ parser.add_argument('--ignore-mycfg', help="ignore some settings hardcoded here"
 parser.add_argument('--enable-thermal-background', help="enable thermal background calc", default=True, action='store_true')
 parser.add_argument('--enable-real-background', help="enable real background (from data), supersedes thermal", default=False, action='store_true')
 parser.add_argument('--output', help="output file name", default='leadsj_vs_x_output.root', type=str)
+parser.add_argument('--eta', help="set eta range must be uniform (e.g. abs(eta) < 0.9, which is ALICE TPC fiducial acceptance)",
+                    type=float, default=0.9)
+parser.add_argument('--dont-write-true-jets', default=False, action='store_true')
+parser.add_argument('--dont-write-comb-jets', default=False, action='store_true')
 
 # for real background
 parser.add_argument('--path-real-background', help="text file with list of files or path to directory containing data", default='./data/', type=str)
@@ -380,8 +384,7 @@ parser.add_argument('--bckg-seed', help="pr gen seed", type=int, default=1111)
 # parser.add_argument('--cent-bin', help="centraility bin 0 is the  0-5 percent most central bin", type=int, default=0)
 # parser.add_argument('--harmonics', help="set harmonics flag (0 : v1 - v5) , (1 : v2 - v5) , (2: v3 - v5) , (3: v1 - v4) , (4: v1 - v3) , (5: uniform dN/dphi no harmonics) , (6 : v1 - v2 , v4 - v5) , (7 : v1 - v3 , v5) , (8 : v1 , v3 - v5) , (9 : v1 only) , (10 : v2 only) , (11 : v3 only) , (12 : v4 only) , (13 : v5 only)",
                     # type=int, default=5)
-parser.add_argument('--eta', help="set eta range must be uniform (e.g. abs(eta) < 0.9, which is ALICE TPC fiducial acceptance)",
-                    type=float, default=0.9)
+
 ### thermal bckg params from arxiv2006.01812
 parser.add_argument('--thermal-Navg', help="mean N particles per event in thermal background generator", type=int, default=int(1800*1.8))
 parser.add_argument('--thermal-Nsigma', help="sigma of N particles per event in thermal background generator", type=int, default=400)
@@ -389,6 +392,7 @@ parser.add_argument('--thermal-beta', help="beta in thermal background generator
 parser.add_argument('--thermal-alpha', help="alpha in thermal background generator", type=float, default=2)
 # parser.add_argument('--qa', help="PrintOutQAHistos", default=False, action='store_true')
 
+parser.add_argument('--min-jet-pt', help="min jet pT for selector", default=5.0, type=float)
 parser.add_argument('--dRmax', help="dRmax in CS", default=0.25, type=float)
 parser.add_argument('--alpha', help="alpha in CS", default=0, type=float)
 parser.add_argument('--verbose', default=False, action='store_true')
@@ -396,14 +400,13 @@ parser.add_argument('--verbose', default=False, action='store_true')
 
 args = parser.parse_args()
 
-
 # print the banner first
 fj.ClusterSequence.print_banner()
 print()
 # set up our jet definition and a jet selector
 jet_R0 = 0.4
 jet_def = fj.JetDefinition(fj.antikt_algorithm, jet_R0)
-jet_selector = fj.SelectorPtMin(20.0) & fj.SelectorPtMax(2000.0) & fj.SelectorAbsEtaMax(args.eta - jet_R0) # & fj.SelectorPtMin(args.py_pthatmin)
+jet_selector = fj.SelectorPtMin(args.min_jet_pt) & fj.SelectorPtMax(2000.0) & fj.SelectorAbsEtaMax(args.eta - jet_R0) # & fj.SelectorPtMin(args.py_pthatmin)
 print(jet_def)
 
 all_jets = []
@@ -434,7 +437,8 @@ print(jet_def_rc01)
 print (jet_def_rc02)
 print (jet_def_rc03)
 
-tw = treewriter.RTreeWriter(name = 'jets', file_name = args.output)
+if not args.dont_write_true_jets: tw_true = treewriter.RTreeWriter(name = 'jets_true', file_name = args.output.replace('.root', '_true.root'))
+if not args.dont_write_comb_jets: tw_comb = treewriter.RTreeWriter(name = 'jets_comb', file_name = args.output.replace('.root', '_comb.root'))
 
 tgbkg = None
 bckg_gen = None
@@ -464,9 +468,14 @@ if args.enable_thermal_background or args.enable_real_background:
 
 
 res_arr = []
-no_match_counter = 0
-match_counter = 0
-for i in tqdm.tqdm(range(args.nev)):
+no_match_counter_true = 0
+match_counter_true = 0
+no_match_counter_comb = 0
+match_counter_comb = 0
+
+exec_id = np.random.randint(1e6)
+print(f'excution ID = {exec_id}')
+for i_event in tqdm.tqdm(range(args.nev)):
     if args.verbose:
         print('\n---\n')
     if not pythia.next():
@@ -542,175 +551,327 @@ for i in tqdm.tqdm(range(args.nev)):
         for j in jets_bckg_selected:
             print_jet(j, prefix='bckg', constit=False, add_info=[print_aver_pt,])
 
-    # for j in jets_combined_selected:
-    #     res = dict(
-    #             pt = j.pt(),
-    #             n_true = len(([p.pt() for p in j.constituents() if p.user_index() > 0])),
-    #             n_bckg = len(([p.pt() for p in j.constituents() if p.user_index() < 0])),
-    #             ptsum_true = np.sum([p.pt() for p in j.constituents() if p.user_index() > 0]),
-    #             ptsum_bckg = np.sum([p.pt() for p in j.constituents() if p.user_index() < 0]),
-    #             )
-    #     res_arr.append(res)
 
-
-
-    # match combined jets to the pythia jets
-    for j_true in jets_truth_selected:
-        if not hasattr(j_true, 'matches'):
-            j_true.matches = []
-        else:
-            perror(f'matched jets array already there - it should not happen {j_true.matches}')
-        for j_comb in jets_combined_selected:
-            dR = j_true.delta_R(j_comb)
-            if dR < jet_matching_distance * jet_R0:
-                j_true.matches.append(j_comb)
-
-    for j_true in jets_truth_selected:
-
-        j_type = match_dR(j_true, partons, jet_R0 / 2.)
-        # if j_type[0] is None:
-        #     if args.nw:
-        #         continue
-        #     pwarning('Jet with no parton label')
-        #     continue
-
-        if args.verbose:
-            print_jet(j_true, prefix='-- true', constit=False)
-        if len(j_true.matches) > 1:
-            pwarning('More then 1 match -- take closest')
-            dR_min = 100.
-            for j_comb in j_true.matches:
+    if not args.dont_write_true_jets:
+        # match combined jets to the pythia jets
+        for j_true in jets_truth_selected:
+            if not hasattr(j_true, 'matches'):
+                j_true.matches = []
+            else:
+                perror(f'matched jets array already there - it should not happen {j_true.matches}')
+            for j_comb in jets_combined_selected:
                 dR = j_true.delta_R(j_comb)
-                if dR < dR_min:
-                    j_comb_matched = j_comb
-                    dR_min = dR
-                if args.verbose:
-                    print_jet(j_comb, prefix='-- match candid', constit=False, add_info=[partial(print_match, j_true=j_true),])
-            # shared_pt_frac_max = -1
-            # for j_comb in j_true.matches:
-            #     shared_pt_frac = fjtools.matched_pt(j_true)
-            #     if shared_pt_frac > shared_pt_frac_max:
-            #         j_comb_matched = j_comb
-            #         shared_pt_frac_max = shared_pt_frac
-            match_counter += 1
-        elif len(j_true.matches) < 1:
-            pwarning('No matches')
-            j_comb_matched = None
-            no_match_counter += 1
-        else:
+                if dR < jet_matching_distance * jet_R0:
+                    j_true.matches.append(j_comb)
+
+        for j_true in jets_truth_selected:
+
+            j_type = match_dR(j_true, partons, jet_R0 / 2.)
+            # if j_type[0] is None:
+            #     if args.nw:
+            #         continue
+            #     pwarning('Jet with no parton label')
+            #     continue
+
             if args.verbose:
-                print('Exactly 1 match')
-            j_comb_matched = j_true.matches[0]
-            match_counter += 1
+                print_jet(j_true, prefix='-- true', constit=False)
+            if len(j_true.matches) > 1:
+                pwarning('More than 1 match for true -- take closest')
+                dR_min = 100.
+                for j_comb in j_true.matches:
+                    dR = j_true.delta_R(j_comb)
+                    if dR < dR_min:
+                        j_comb_matched = j_comb
+                        dR_min = dR
+                    if args.verbose:
+                        print_jet(j_comb, prefix='-- match candid', constit=False, add_info=[partial(print_match, j=j_true),])
+                # shared_pt_frac_max = -1
+                # for j_comb in j_true.matches:
+                #     shared_pt_frac = fjtools.matched_pt(j_true)
+                #     if shared_pt_frac > shared_pt_frac_max:
+                #         j_comb_matched = j_comb
+                #         shared_pt_frac_max = shared_pt_frac
+                match_counter_true += 1
+            elif len(j_true.matches) < 1:
+                pwarning('No matches for true')
+                j_comb_matched = None
+                no_match_counter_true += 1
+            else:
+                if args.verbose:
+                    print('Exactly 1 match for true')
+                j_comb_matched = j_true.matches[0]
+                match_counter_true += 1
 
 
-        if args.verbose and j_comb_matched:
-            print_jet(j_comb_matched, prefix='-- matched', constit=False, add_info=[partial(print_match, j_true=j_true),])
+            if args.verbose and j_comb_matched:
+                print_jet(j_comb_matched, prefix='-- matched', constit=False, add_info=[partial(print_match, j=j_true),])
 
 
-        list_of_groomers = [    ('soft_drop', [0, 0.001]),
-                                ('soft_drop', [0, 0.01]),
-                                 ('soft_drop', [0, 0.1]),
-                                 ('soft_drop', [0, 0.2]),
-                                 ('soft_drop', [0, 0.3]),
-                                 ('dynamical', [0.1]),
-                                 ('dynamical', [1.0]),
-                                 ('dynamical', [2.0]),
-                                 ('max_pt_softer', []),
-                                 ('max_z', []),
-                                 ('max_kt', []),
-                                 ('max_kappa', []),
-                                 ('max_tf', []),
-                                 ('min_tf', [])]
-        groomers_flags = dict()
-        groomed_true_ls = dict()
-        groomed_comb_ls = dict()
-        gshop_true = fjcontrib.GroomerShop(j_true)
-        if j_comb_matched:
-            gshop_comb = fjcontrib.GroomerShop(j_comb_matched)
-            matched_pt_res = {}
-            for g_algo, g_params in list_of_groomers:
-                matched_pt_res_cur = {}
-                flag = flag_prong_matching(j_comb_matched, j_true, g_algo, g_params, matched_pt_res_cur)
-                name = groomer2str(g_algo, g_params)
-                matched_pt_res[name] = matched_pt_res_cur
-                groomers_flags[name] = flag
-                groomed_true_ls[name] = getattr(gshop_true, g_algo)(*g_params)
-                groomed_comb_ls[name] = getattr(gshop_comb, g_algo)(*g_params)
-        else:
-            for g_algo, g_params in list_of_groomers:
-                name = groomer2str(g_algo, g_params)
-                groomers_flags[name] = 10
-                groomed_true_ls[name] = getattr(gshop_true, g_algo)(*g_params)
-
-        if args.verbose:
-            print(groomers_flags)
-            print('true:')
-            print('\n'.join([k +': '+ ls2str(ls) for k,ls in groomed_true_ls.items()]))
+            list_of_groomers = [    ('soft_drop', [0, 0.001]),
+                                    ('soft_drop', [0, 0.01]),
+                                     ('soft_drop', [0, 0.1]),
+                                     ('soft_drop', [0, 0.2]),
+                                     ('soft_drop', [0, 0.3]),
+                                     ('dynamical', [0.1]),
+                                     ('dynamical', [1.0]),
+                                     ('dynamical', [2.0]),
+                                     ('max_pt_softer', []),
+                                     ('max_z', []),
+                                     ('max_kt', []),
+                                     ('max_kappa', []),
+                                     ('max_tf', []),
+                                     ('min_tf', [])]
+            groomers_flags = dict()
+            groomed_true_ls = dict()
+            groomed_comb_ls = dict()
+            gshop_true = fjcontrib.GroomerShop(j_true)
             if j_comb_matched:
+                gshop_comb = fjcontrib.GroomerShop(j_comb_matched)
+                matched_pt_res = {}
+                for g_algo, g_params in list_of_groomers:
+                    matched_pt_res_cur = {}
+                    flag = flag_prong_matching(j_comb_matched, j_true, g_algo, g_params, matched_pt_res_cur)
+                    name = groomer2str(g_algo, g_params)
+                    matched_pt_res[name] = matched_pt_res_cur
+                    groomers_flags[name] = flag
+                    groomed_true_ls[name] = getattr(gshop_true, g_algo)(*g_params)
+                    groomed_comb_ls[name] = getattr(gshop_comb, g_algo)(*g_params)
+            else:
+                for g_algo, g_params in list_of_groomers:
+                    name = groomer2str(g_algo, g_params)
+                    groomers_flags[name] = 10
+                    groomed_true_ls[name] = getattr(gshop_true, g_algo)(*g_params)
+
+            if args.verbose:
+                print(groomers_flags)
+                print('true:')
+                print('\n'.join([k +': '+ ls2str(ls) for k,ls in groomed_true_ls.items()]))
+                if j_comb_matched:
+                    print('combined:')
+                    print('\n'.join([k +': '+ ls2str(ls) for k,ls in groomed_comb_ls.items()]))
+                # print(groomed_comb_ls)
+
+                print('all splits, true:')
+                for ls in lund_gen.result(j_true):
+                    print(ls2str(ls))
+                print('all splits, combined:')
+                if j_comb_matched:
+                    for ls in lund_gen.result(j_comb_matched):
+                        print(ls2str(ls))
+
+            tw_true.fill_branches(
+                              evt_id = i_event + int(1e6) * exec_id,
+                              j = j_true,
+                              j_comb = j_comb_matched,
+                              dR_comb = j_true.delta_R(j_comb_matched) if j_comb_matched else None,
+                              flag = groomers_flags,
+
+                              pt_matched = fjtools.matched_pt(j_comb_matched, j_true)  if j_comb_matched else None,
+                              pt_matched2 = fjtools.matched_pt(j_true, j_comb_matched) if j_comb_matched else None,
+
+                              n_matches = len(j_true.matches),
+                              matches = j_true.matches,
+                              dR_matches = [j_true.delta_R(j_match) for j_match in j_true.matches],
+
+                              lund = [ls for ls in lund_gen.result(j_true)],
+                              lund_comb = [ls for ls in lund_gen.result(j_comb_matched)] if j_comb_matched else None,
+                              groomed = groomed_true_ls,
+                              groomed_comb = groomed_comb_ls if j_comb_matched else None,
+
+                              matched_pt = matched_pt_res if j_comb_matched else None,
+
+                              #const = j_true.constituents(),
+                              #const_comb = j_comb_matched.constituents(),
+
+                              bckg2 = bckg_gen.last_event_prop if hasattr(bckg_gen, 'last_event_prop') else None,
+                              bckg = bckg_prop,
+
+                                ppid           = j_type[0] if j_type[0] else 99,
+                                pquark         = j_type[1] if j_type[1] else 99,
+                                pglue          = j_type[2] if j_type[2] else 99,
+
+                                pycode         = pythia.info.code(),
+                                pysigmagen  = pythia.info.sigmaGen(),
+                                pysigmaerr  = pythia.info.sigmaErr(),
+                                pyid1       = pythia.info.id1pdf(),
+                                pyid2       = pythia.info.id1pdf(),
+                                pyx1         = pythia.info.x1pdf(),
+                                pyx2           = pythia.info.x2pdf(),
+                                pypdf1      = pythia.info.pdf1(),
+                                pyQfac         = pythia.info.QFac(),
+                                pyalphaS     = pythia.info.alphaS(),
+
+                                pypthat     = pythia.info.pTHat(),
+                                pymhat         = pythia.info.mHat(),
+                                )
+            tw_true.fill_tree()
+        # don't pollute further part by mistake
+        # del j_true, j_comb_matched
+
+
+    if not args.dont_write_comb_jets:
+        # match pythia jets to the combined jets
+        for j_comb in jets_combined_selected:
+            if not hasattr(j_comb, 'matches'):
+                j_comb.matches = []
+            else:
+                perror(f'matched jets array already there - it should not happen {j_comb.matches}')
+            for j_true in jets_truth_selected:
+                dR = j_comb.delta_R(j_true)
+                if dR < jet_matching_distance * jet_R0:
+                    j_comb.matches.append(j_true)
+
+        for j_comb in jets_combined_selected:
+
+            j_type = match_dR(j_comb, partons, jet_R0 / 2.)
+            # if j_type[0] is None:
+            #     if args.nw:
+            #         continue
+            #     pwarning('Jet with no parton label')
+            #     continue
+
+            if args.verbose:
+                print_jet(j_comb, prefix='-- comb', constit=False)
+            if len(j_comb.matches) > 1:
+                pwarning('More than 1 match for comb -- take closest')
+                dR_min = 100.
+                for j_true in j_comb.matches:
+                    dR = j_comb.delta_R(j_true)
+                    if dR < dR_min:
+                        j_true_matched = j_true
+                        dR_min = dR
+                    if args.verbose:
+                        print_jet(j_true, prefix='-- match candid', constit=False, add_info=[partial(print_match, j=j_comb),])
+                # shared_pt_frac_max = -1
+                # for j_comb in j_true.matches:
+                #     shared_pt_frac = fjtools.matched_pt(j_true)
+                #     if shared_pt_frac > shared_pt_frac_max:
+                #         j_comb_matched = j_comb
+                #         shared_pt_frac_max = shared_pt_frac
+                match_counter_comb += 1
+            elif len(j_comb.matches) < 1:
+                if args.verbose: print('No matches for comb')
+                j_true_matched = None
+                no_match_counter_comb += 1
+            else:
+                if args.verbose:
+                    print('Exactly 1 match for comb')
+                j_true_matched = j_comb.matches[0]
+                match_counter_comb += 1
+
+
+            if args.verbose and j_true_matched:
+                print_jet(j_true_matched, prefix='-- matched', constit=False, add_info=[partial(print_match, j=j_comb),])
+
+
+            list_of_groomers = [    ('soft_drop', [0, 0.001]),
+                                    ('soft_drop', [0, 0.01]),
+                                     ('soft_drop', [0, 0.1]),
+                                     ('soft_drop', [0, 0.2]),
+                                     ('soft_drop', [0, 0.3]),
+                                     ('dynamical', [0.1]),
+                                     ('dynamical', [1.0]),
+                                     ('dynamical', [2.0]),
+                                     ('max_pt_softer', []),
+                                     ('max_z', []),
+                                     ('max_kt', []),
+                                     ('max_kappa', []),
+                                     ('max_tf', []),
+                                     ('min_tf', [])]
+            groomers_flags = dict()
+            groomed_true_ls = dict()
+            groomed_comb_ls = dict()
+            gshop_comb = fjcontrib.GroomerShop(j_comb)
+            if j_true_matched:
+                gshop_true = fjcontrib.GroomerShop(j_true_matched)
+                matched_pt_res = {}
+                for g_algo, g_params in list_of_groomers:
+                    matched_pt_res_cur = {}
+                    flag = flag_prong_matching(j_true_matched, j_comb, g_algo, g_params, matched_pt_res_cur)
+                    name = groomer2str(g_algo, g_params)
+                    matched_pt_res[name] = matched_pt_res_cur
+                    groomers_flags[name] = flag
+                    groomed_comb_ls[name] = getattr(gshop_comb, g_algo)(*g_params)
+                    groomed_true_ls[name] = getattr(gshop_true, g_algo)(*g_params)
+            else:
+                for g_algo, g_params in list_of_groomers:
+                    name = groomer2str(g_algo, g_params)
+                    groomers_flags[name] = 10
+                    groomed_comb_ls[name] = getattr(gshop_comb, g_algo)(*g_params)
+
+            if args.verbose:
+                print(groomers_flags)
                 print('combined:')
                 print('\n'.join([k +': '+ ls2str(ls) for k,ls in groomed_comb_ls.items()]))
-            # print(groomed_comb_ls)
+                if j_true_matched:
+                    print('true:')
+                    print('\n'.join([k +': '+ ls2str(ls) for k,ls in groomed_true_ls.items()]))
+                # print(groomed_comb_ls)
 
-            print('all splits, true:')
-            for ls in lund_gen.result(j_true):
-                print(ls2str(ls))
-            print('all splits, combined:')
-            if j_comb_matched:
-                for ls in lund_gen.result(j_comb_matched):
+                print('all splits, comb:')
+                for ls in lund_gen.result(j_comb):
                     print(ls2str(ls))
+                print('all splits, true:')
+                if j_true_matched:
+                    for ls in lund_gen.result(j_true_matched):
+                        print(ls2str(ls))
 
-        tw.fill_branches( j = j_true,
-                          j_comb = j_comb_matched,
-                          dR_comb = j_true.delta_R(j_comb_matched) if j_comb_matched else None,
-                          flag = groomers_flags,
+            tw_comb.fill_branches(
+                              evt_id = i_event + int(1e6) * exec_id,
+                              j = j_comb,
+                              j_true = j_true_matched,
+                              dR_true = j_comb.delta_R(j_true_matched) if j_true_matched else None,
+                              flag = groomers_flags,
 
-                          pt_matched = fjtools.matched_pt(j_comb_matched, j_true)  if j_comb_matched else None,
-                          pt_matched2 = fjtools.matched_pt(j_true, j_comb_matched) if j_comb_matched else None,
+                              pt_matched = fjtools.matched_pt(j_true_matched, j_comb)  if j_true_matched else None,
+                              pt_matched2 = fjtools.matched_pt(j_comb, j_true_matched) if j_true_matched else None,
 
-                          n_matches = len(j_true.matches),
-                          matches = j_true.matches,
-                          dR_matches = [j_true.delta_R(j_match) for j_match in j_true.matches],
+                              n_matches = len(j_comb.matches),
+                              matches = j_comb.matches,
+                              dR_matches = [j_comb.delta_R(j_match) for j_match in j_comb.matches],
 
-                          lund = [ls for ls in lund_gen.result(j_true)],
-                          lund_comb = [ls for ls in lund_gen.result(j_comb_matched)] if j_comb_matched else None,
-                          groomed = groomed_true_ls,
-                          groomed_comb = groomed_comb_ls if j_comb_matched else None,
+                              lund = [ls for ls in lund_gen.result(j_comb)],
+                              lund_true = [ls for ls in lund_gen.result(j_true_matched)] if j_true_matched else None,
+                              groomed = groomed_comb_ls,
+                              groomed_true = groomed_true_ls if j_true_matched else None,
 
-                          matched_pt = matched_pt_res if j_comb_matched else None,
+                              matched_pt = matched_pt_res if j_true_matched else None,
 
-                          #const = j_true.constituents(),
-                          #const_comb = j_comb_matched.constituents(),
+                              #const = j_true.constituents(),
+                              #const_comb = j_comb_matched.constituents(),
 
-                          bckg2 = bckg_gen.last_event_prop if hasattr(bckg_gen, 'last_event_prop') else None,
-                          bckg = bckg_prop,
+                              bckg2 = bckg_gen.last_event_prop if hasattr(bckg_gen, 'last_event_prop') else None,
+                              bckg = bckg_prop,
 
-                            ppid           = j_type[0] if j_type[0] else 99,
-                            pquark         = j_type[1] if j_type[1] else 99,
-                            pglue          = j_type[2] if j_type[2] else 99,
+                                ppid           = j_type[0] if j_type[0] else 999,
+                                pquark         = j_type[1] if j_type[1] else 999,
+                                pglue          = j_type[2] if j_type[2] else 999,
 
-                            pycode         = pythia.info.code(),
-                            pysigmagen  = pythia.info.sigmaGen(),
-                            pysigmaerr  = pythia.info.sigmaErr(),
-                            pyid1       = pythia.info.id1pdf(),
-                            pyid2       = pythia.info.id1pdf(),
-                            pyx1         = pythia.info.x1pdf(),
-                            pyx2           = pythia.info.x2pdf(),
-                            pypdf1      = pythia.info.pdf1(),
-                            pyQfac         = pythia.info.QFac(),
-                            pyalphaS     = pythia.info.alphaS(),
+                                pycode      = pythia.info.code(),
+                                pysigmagen  = pythia.info.sigmaGen(),
+                                pysigmaerr  = pythia.info.sigmaErr(),
+                                pyid1       = pythia.info.id1pdf(),
+                                pyid2       = pythia.info.id1pdf(),
+                                pyx1         = pythia.info.x1pdf(),
+                                pyx2           = pythia.info.x2pdf(),
+                                pypdf1      = pythia.info.pdf1(),
+                                pyQfac         = pythia.info.QFac(),
+                                pyalphaS     = pythia.info.alphaS(),
 
-                            pypthat     = pythia.info.pTHat(),
-                            pymhat         = pythia.info.mHat(),
-                            )
-        tw.fill_tree()
+                                pypthat     = pythia.info.pTHat(),
+                                pymhat         = pythia.info.mHat(),
+                                )
+            tw_comb.fill_tree()
+        # del j_comb, j_true_matched
 
 
-print(f'#jets w/  matches: {match_counter}\n#jets w/o matches: {no_match_counter}')
+print(f'#true jets w/  matches: {match_counter_true}\n#true jets w/o matches: {no_match_counter_true}')
+print(f'#comb jets w/  matches: {match_counter_comb}\n#comb jets w/o matches: {no_match_counter_comb}')
 
 pythia.stat()
 
-tw.write_and_close()
+if not args.dont_write_true_jets: tw_true.write_and_close()
+if not args.dont_write_comb_jets: tw_comb.write_and_close()
 
 # import pandas as pd
 # df = pd.DataFrame(res_arr)
