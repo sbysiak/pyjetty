@@ -193,7 +193,7 @@ class RealBckgGenerator(common_base.CommonBase):
             print(self.last_event_prop)
         return tracks
 
-def flag_prong_matching(j_comb, j_true, grooming_algo='', grooming_params=[], store_values=None):
+def flag_prong_matching(j_comb, j_true, jet_def, grooming_algo='', grooming_params=[], store_values=None):
     #  Return flag based on where >50% of subleading matched pt resides:
     #    1: subleading
     #    2: leading, swap (>10% of leading in subleading)
@@ -204,8 +204,8 @@ def flag_prong_matching(j_comb, j_true, grooming_algo='', grooming_params=[], st
     #    7: pp-truth passed grooming, but combined jet failed grooming
     #    8: combined jet passed grooming, but pp-truth failed grooming
     #    9: both pp-truth and combined jet failed SoftDrop
-    gshop_comb = fjcontrib.GroomerShop(j_comb)
-    gshop_true = fjcontrib.GroomerShop(j_true)
+    gshop_comb = fjcontrib.GroomerShop(j_comb, jet_def)
+    gshop_true = fjcontrib.GroomerShop(j_true, jet_def)
 
     ls_comb = getattr(gshop_comb, grooming_algo)(*grooming_params)
     ls_true = getattr(gshop_true, grooming_algo)(*grooming_params)
@@ -356,46 +356,61 @@ def print_match(j_match, j):
     return f'dR = {j.delta_R(j_match):.2f}, shared_pt_frac = {fjtools.matched_pt(j_match, j):.2f} ,  {fjtools.matched_pt(j, j_match):.2f}'
 
 def groomer2str(g_algo, g_params):
+    if g_algo == 'soft_drop' and len(g_params) == 3:
+        # drop last param which is just jet radius
+        g_params = g_params[:2]
     return g_algo + ("" if not g_params else "_".join([str(p).replace(".", "") for p in ["",]+ g_params]))
 
 def ls2str(ls):
     # print(dir(ls))
     return f'z={ls.z():.3f} Delta={ls.Delta():.3f} kt={ls.kt():.2f} Erad={ls.kt()/(ls.z()*ls.Delta()):.2f}'
 
+def is_hb(pid):
+    pid = abs(pid)
+    return (pid > 500 and pid < 600) or (pid > 5000 and pid < 6000)
+
+def is_hc(pid):
+    pid = abs(pid)
+    return (pid > 400 and pid < 500) or (pid > 4000 and pid < 5000)
+
+
 
 # def main():
 parser = argparse.ArgumentParser(description='pythia8 fastjet on the fly', prog=os.path.basename(__file__))
 pyconf.add_standard_pythia_args(parser)
+### steering
 parser.add_argument('--nw', help="no warn", default=False, action='store_true')
 parser.add_argument('--ignore-mycfg', help="ignore some settings hardcoded here", default=False, action='store_true')
 parser.add_argument('--enable-thermal-background', help="enable thermal background calc", default=True, action='store_true')
 parser.add_argument('--enable-real-background', help="enable real background (from data), supersedes thermal", default=False, action='store_true')
 parser.add_argument('--output', help="output file name", default='leadsj_vs_x_output.root', type=str)
-parser.add_argument('--eta', help="set eta range must be uniform (e.g. abs(eta) < 0.9, which is ALICE TPC fiducial acceptance)",
-                    type=float, default=0.9)
 parser.add_argument('--dont-write-true-jets', default=False, action='store_true')
 parser.add_argument('--dont-write-comb-jets', default=False, action='store_true')
+parser.add_argument('--verbose', default=False, action='store_true')
 
-# for real background
+### jet and phase-space params
+parser.add_argument('--min-jet-pt', help="min jet pT for selector", default=5.0, type=float)
+parser.add_argument('--eta', help="set eta range must be uniform (e.g. abs(eta) < 0.9, which is ALICE TPC fiducial acceptance)",
+                    type=float, default=0.9)
+parser.add_argument('--jet-R', help="jet radius", type=float, default=0.4)
+parser.add_argument('--recluster-algo', help="reclustering algo: KT or AKT or CA (=default)", default='CA', type=str)
+
+### background
+parser.add_argument('--bckg-seed', help="pr gen seed", type=int, default=1111)
+
+### real background
 parser.add_argument('--path-real-background', help="text file with list of files or path to directory containing data", default='./data/', type=str)
 
-# for background
-parser.add_argument('--bckg-seed', help="pr gen seed", type=int, default=1111)
-# parser.add_argument('--cent-bin', help="centraility bin 0 is the  0-5 percent most central bin", type=int, default=0)
-# parser.add_argument('--harmonics', help="set harmonics flag (0 : v1 - v5) , (1 : v2 - v5) , (2: v3 - v5) , (3: v1 - v4) , (4: v1 - v3) , (5: uniform dN/dphi no harmonics) , (6 : v1 - v2 , v4 - v5) , (7 : v1 - v3 , v5) , (8 : v1 , v3 - v5) , (9 : v1 only) , (10 : v2 only) , (11 : v3 only) , (12 : v4 only) , (13 : v5 only)",
-                    # type=int, default=5)
-
-### thermal bckg params from arxiv2006.01812
-parser.add_argument('--thermal-Navg', help="mean N particles per event in thermal background generator", type=int, default=int(1800*1.8))
+### thermal bckg, params from arxiv2006.01812
+parser.add_argument('--thermal-Navg', help="mean dN/deta particles per event in thermal background generator", type=int, default=1800)
 parser.add_argument('--thermal-Nsigma', help="sigma of N particles per event in thermal background generator", type=int, default=400)
 parser.add_argument('--thermal-beta', help="beta in thermal background generator", type=float, default=0.5)
 parser.add_argument('--thermal-alpha', help="alpha in thermal background generator", type=float, default=2)
-# parser.add_argument('--qa', help="PrintOutQAHistos", default=False, action='store_true')
 
-parser.add_argument('--min-jet-pt', help="min jet pT for selector", default=5.0, type=float)
+### ConstituentSubtractor
 parser.add_argument('--dRmax', help="dRmax in CS", default=0.25, type=float)
 parser.add_argument('--alpha', help="alpha in CS", default=0, type=float)
-parser.add_argument('--verbose', default=False, action='store_true')
+
 
 
 args = parser.parse_args()
@@ -404,7 +419,7 @@ args = parser.parse_args()
 fj.ClusterSequence.print_banner()
 print()
 # set up our jet definition and a jet selector
-jet_R0 = 0.4
+jet_R0 = args.jet_R
 jet_def = fj.JetDefinition(fj.antikt_algorithm, jet_R0)
 jet_selector = fj.SelectorPtMin(args.min_jet_pt) & fj.SelectorPtMax(2000.0) & fj.SelectorAbsEtaMax(args.eta - jet_R0) # & fj.SelectorPtMin(args.py_pthatmin)
 print(jet_def)
@@ -419,23 +434,28 @@ pythia = pyconf.create_and_init_pythia_from_args(args, mycfg)
 if not pythia:
     perror("pythia initialization failed.")
 
-jet_def_lund = fj.JetDefinition(fj.cambridge_algorithm, 1.0)
+if args.recluster_algo == 'CA':
+    jet_def_lund = fj.JetDefinition(fj.cambridge_algorithm, 1.0)
+elif args.recluster_algo == 'AKT':
+    jet_def_lund = fj.JetDefinition(fj.antikt_algorithm, 1.0)
+elif args.recluster_algo == 'KT':
+    jet_def_lund = fj.JetDefinition(fj.kt_algorithm, 1.0)
+else:
+    raise ValueError(args.recluster_algo)
 lund_gen = fjcontrib.LundGenerator(jet_def_lund)
 print (lund_gen.description())
-dy_groomer = fjcontrib.DynamicalGroomer(jet_def_lund)
-print (dy_groomer.description())
 
 jet_matching_distance = 0.6
 print(f'jet matching distance: {jet_matching_distance} (match jets with dR < jet_matching_distance * jetR)')
 
-jet_def_rc005 = fj.JetDefinition(fj.antikt_algorithm, 0.05)
-jet_def_rc01 = fj.JetDefinition(fj.antikt_algorithm, 0.1)
-jet_def_rc02 = fj.JetDefinition(fj.antikt_algorithm, 0.2)
-jet_def_rc03 = fj.JetDefinition(fj.antikt_algorithm, 0.3)
-print(jet_def_rc005)
-print(jet_def_rc01)
-print (jet_def_rc02)
-print (jet_def_rc03)
+# jet_def_rc005 = fj.JetDefinition(fj.antikt_algorithm, 0.05)
+# jet_def_rc01 = fj.JetDefinition(fj.antikt_algorithm, 0.1)
+# jet_def_rc02 = fj.JetDefinition(fj.antikt_algorithm, 0.2)
+# jet_def_rc03 = fj.JetDefinition(fj.antikt_algorithm, 0.3)
+# print(jet_def_rc005)
+# print(jet_def_rc01)
+# print (jet_def_rc02)
+# print (jet_def_rc03)
 
 if not args.dont_write_true_jets: tw_true = treewriter.RTreeWriter(name = 'jets_true', file_name = args.output.replace('.root', '_true.root'))
 if not args.dont_write_comb_jets: tw_comb = treewriter.RTreeWriter(name = 'jets_comb', file_name = args.output.replace('.root', '_comb.root'))
@@ -458,7 +478,7 @@ if args.enable_thermal_background or args.enable_real_background:
         from pyjetty.alice_analysis.process.base import thermal_generator
         ### hopefully this sets seed for thermal generator
         np.random.seed(args.bckg_seed)
-        bckg_gen = thermal_generator.ThermalGenerator(N_avg=args.thermal_Navg,
+        bckg_gen = thermal_generator.ThermalGenerator(N_avg=args.thermal_Navg * 2 * args.eta,
                                                  sigma_N=args.thermal_Nsigma, # not specified in ref
                                                  beta=args.thermal_beta,
                                                  alpha=args.thermal_alpha,
@@ -609,12 +629,27 @@ for i_event in tqdm.tqdm(range(args.nev)):
 
             list_of_groomers = [    ('soft_drop', [0, 0.001]),
                                     ('soft_drop', [0, 0.01]),
+                                    ('soft_drop', [0, 0.03]),
                                      ('soft_drop', [0, 0.1]),
                                      ('soft_drop', [0, 0.2]),
                                      ('soft_drop', [0, 0.3]),
+
+                                     ('soft_drop', [1, 0.1, jet_R0]),
+                                     ('soft_drop', [1, 0.3, jet_R0]),
+                                     ('soft_drop', [1, 1, jet_R0]),
+
+                                     ('soft_drop', [2, 0.1, jet_R0]),
+                                     ('soft_drop', [2, 0.3, jet_R0]),
+                                     ('soft_drop', [2, 1, jet_R0]),
+                                     ('soft_drop', [2, 5, jet_R0]),
+
+                                     ('dynamical', [0.01]),
                                      ('dynamical', [0.1]),
+                                     ('dynamical', [0.3]),
+                                     ('dynamical', [0.5]),
                                      ('dynamical', [1.0]),
                                      ('dynamical', [2.0]),
+
                                      ('max_pt_softer', []),
                                      ('max_z', []),
                                      ('max_kt', []),
@@ -624,13 +659,13 @@ for i_event in tqdm.tqdm(range(args.nev)):
             groomers_flags = dict()
             groomed_true_ls = dict()
             groomed_comb_ls = dict()
-            gshop_true = fjcontrib.GroomerShop(j_true)
+            gshop_true = fjcontrib.GroomerShop(j_true, jet_def_lund)
             if j_comb_matched:
-                gshop_comb = fjcontrib.GroomerShop(j_comb_matched)
+                gshop_comb = fjcontrib.GroomerShop(j_comb_matched, jet_def_lund)
                 matched_pt_res = {}
                 for g_algo, g_params in list_of_groomers:
                     matched_pt_res_cur = {}
-                    flag = flag_prong_matching(j_comb_matched, j_true, g_algo, g_params, matched_pt_res_cur)
+                    flag = flag_prong_matching(j_comb_matched, j_true, jet_def_lund, g_algo, g_params, matched_pt_res_cur)
                     name = groomer2str(g_algo, g_params)
                     matched_pt_res[name] = matched_pt_res_cur
                     groomers_flags[name] = flag
@@ -659,6 +694,8 @@ for i_event in tqdm.tqdm(range(args.nev)):
                     for ls in lund_gen.result(j_comb_matched):
                         print(ls2str(ls))
 
+            constits_true = fj.sorted_by_pt(j_true.constituents())
+            constits_comb = fj.sorted_by_pt(j_comb_matched.constituents()) if j_comb_matched else None
             tw_true.fill_branches(
                               evt_id = i_event + int(1e6) * exec_id,
                               j = j_true,
@@ -680,8 +717,18 @@ for i_event in tqdm.tqdm(range(args.nev)):
 
                               matched_pt = matched_pt_res if j_comb_matched else None,
 
-                              #const = j_true.constituents(),
-                              #const_comb = j_comb_matched.constituents(),
+                              const = constits_true,
+                              const_pT = [pythia.event[c.user_index()].pT() if c.user_index() > 0 else 0 for c in constits_true],
+                              const_pid = [pythia.event[c.user_index()].id() if c.user_index() > 0 else 0 for c in constits_true],
+                              hasBeauty = any([is_hb(pythia.event[c.user_index()].id()) for c in constits_true if c.user_index() > 0]),
+                              hasCharm = any([is_hc(pythia.event[c.user_index()].id()) for c in constits_true if c.user_index() > 0]),
+
+                              const_comb = constits_comb,
+                              const_comb_pT = [pythia.event[c.user_index()].pT() if c.user_index() > 0 else 0 for c in constits_comb] if constits_comb else None,
+                              const_comb_pid = [pythia.event[c.user_index()].id() if c.user_index() > 0 else 0 for c in constits_comb] if constits_comb else None,
+                              hasBeauty_comb = any([is_hb(pythia.event[c.user_index()].id()) for c in constits_comb if c.user_index() > 0]) if constits_comb else None,
+                              hasCharm_comb = any([is_hc(pythia.event[c.user_index()].id()) for c in constits_comb if c.user_index() > 0]) if constits_comb else None,
+
 
                               bckg2 = bckg_gen.last_event_prop if hasattr(bckg_gen, 'last_event_prop') else None,
                               bckg = bckg_prop,
@@ -766,12 +813,27 @@ for i_event in tqdm.tqdm(range(args.nev)):
 
             list_of_groomers = [    ('soft_drop', [0, 0.001]),
                                     ('soft_drop', [0, 0.01]),
+                                    ('soft_drop', [0, 0.03]),
                                      ('soft_drop', [0, 0.1]),
                                      ('soft_drop', [0, 0.2]),
                                      ('soft_drop', [0, 0.3]),
+
+                                     ('soft_drop', [1, 0.1, jet_R0]),
+                                     ('soft_drop', [1, 0.3, jet_R0]),
+                                     ('soft_drop', [1, 1, jet_R0]),
+
+                                     ('soft_drop', [2, 0.1, jet_R0]),
+                                     ('soft_drop', [2, 0.3, jet_R0]),
+                                     ('soft_drop', [2, 1, jet_R0]),
+                                     ('soft_drop', [2, 5, jet_R0]),
+
+                                     ('dynamical', [0.01]),
                                      ('dynamical', [0.1]),
+                                     ('dynamical', [0.3]),
+                                     ('dynamical', [0.5]),
                                      ('dynamical', [1.0]),
                                      ('dynamical', [2.0]),
+
                                      ('max_pt_softer', []),
                                      ('max_z', []),
                                      ('max_kt', []),
@@ -781,13 +843,13 @@ for i_event in tqdm.tqdm(range(args.nev)):
             groomers_flags = dict()
             groomed_true_ls = dict()
             groomed_comb_ls = dict()
-            gshop_comb = fjcontrib.GroomerShop(j_comb)
+            gshop_comb = fjcontrib.GroomerShop(j_comb, jet_def_lund)
             if j_true_matched:
-                gshop_true = fjcontrib.GroomerShop(j_true_matched)
+                gshop_true = fjcontrib.GroomerShop(j_true_matched, jet_def_lund)
                 matched_pt_res = {}
                 for g_algo, g_params in list_of_groomers:
                     matched_pt_res_cur = {}
-                    flag = flag_prong_matching(j_true_matched, j_comb, g_algo, g_params, matched_pt_res_cur)
+                    flag = flag_prong_matching(j_true_matched, j_comb, jet_def_lund, g_algo, g_params, matched_pt_res_cur)
                     name = groomer2str(g_algo, g_params)
                     matched_pt_res[name] = matched_pt_res_cur
                     groomers_flags[name] = flag
@@ -816,6 +878,8 @@ for i_event in tqdm.tqdm(range(args.nev)):
                     for ls in lund_gen.result(j_true_matched):
                         print(ls2str(ls))
 
+            constits_comb = fj.sorted_by_pt(j_comb.constituents())
+            constits_true = fj.sorted_by_pt(j_true_matched.constituents()) if j_true_matched else None
             tw_comb.fill_branches(
                               evt_id = i_event + int(1e6) * exec_id,
                               j = j_comb,
@@ -837,8 +901,18 @@ for i_event in tqdm.tqdm(range(args.nev)):
 
                               matched_pt = matched_pt_res if j_true_matched else None,
 
-                              #const = j_true.constituents(),
-                              #const_comb = j_comb_matched.constituents(),
+
+                              const = constits_comb,
+                              const_pT = [pythia.event[c.user_index()].pT() if c.user_index() > 0 else 0 for c in constits_comb],
+                              const_pid = [pythia.event[c.user_index()].id() if c.user_index() > 0 else 0 for c in constits_comb],
+                              hasBeauty = any([is_hb(pythia.event[c.user_index()].id()) for c in constits_comb if c.user_index() > 0]),
+                              hasCharm = any([is_hc(pythia.event[c.user_index()].id()) for c in constits_comb if c.user_index() > 0]),
+
+                              const_true = constits_true,
+                              const_true_pT = [pythia.event[c.user_index()].pT() if c.user_index() > 0 else 0 for c in constits_true] if constits_true else None,
+                              const_true_pid = [pythia.event[c.user_index()].id() if c.user_index() > 0 else 0 for c in constits_true] if constits_true else None,
+                              hasBeauty_true = any([is_hb(pythia.event[c.user_index()].id()) for c in constits_true if c.user_index() > 0]) if constits_true else None,
+                              hasCharm_true = any([is_hc(pythia.event[c.user_index()].id()) for c in constits_true if c.user_index() > 0]) if constits_true else None,
 
                               bckg2 = bckg_gen.last_event_prop if hasattr(bckg_gen, 'last_event_prop') else None,
                               bckg = bckg_prop,
